@@ -2,10 +2,11 @@ import json
 
 from flask import make_response
 from marshmallow import fields, Schema, post_load, EXCLUDE
+import pytest
 
 from flask_apispec.utils import Ref
 from flask_apispec.views import MethodResource
-from flask_apispec import doc, use_kwargs, marshal_with
+from flask_apispec import doc, use_args, use_kwargs, marshal_with
 
 
 # All the following schemas are set with unknown = EXCLUDE
@@ -40,6 +41,88 @@ class InstrumentSchema(Schema):
         unknown = EXCLUDE
 
 class TestFunctionViews:
+
+    def test_use_args(self, app, client):
+        @app.route('/')
+        @use_args({'name': fields.Str()}, location='querystring')
+        def view(*args):
+            return args
+        res = client.get('/', {'name': 'freddie'})
+        assert res.json == {'name': 'freddie'}
+
+    def test_use_args_schema(self, app, client):
+        class ArgSchema(Schema):
+            name = fields.Str()
+
+        @app.route('/')
+        @use_args(ArgSchema, location='querystring')
+        def view(*args):
+            return args
+        res = client.get('/', {'name': 'freddie'})
+        assert res.json == {'name': 'freddie'}
+
+    def test_use_args_schema_with_post_load(self, app, client):
+        class User:
+            def __init__(self, name):
+                self.name = name
+
+            def update(self, name):
+                self.name = name
+
+        class ArgSchema(Schema):
+            name = fields.Str()
+
+            @post_load
+            def make_object(self, data, **kwargs):
+                return User(**data)
+
+        @app.route('/', methods=('POST', ))
+        @use_args(ArgSchema(), location='form')
+        def view(user):
+            assert isinstance(user, User)
+            return {'name': user.name}
+
+        data = {'name': 'freddie'}
+        res = client.post('/', data)
+        assert res.json == data
+
+    def test_use_args_schema_many(self, app, client):
+        class ArgSchema(Schema):
+            name = fields.Str()
+
+        @app.route('/', methods=('POST',))
+        @use_args(ArgSchema(many=True), location='json')
+        def view(args):
+            return args
+        data = [{'name': 'freddie'}, {'name': 'john'}]
+        res = client.post('/', json.dumps(data), content_type='application/json')
+        assert res.json == data
+
+    def test_use_args_multiple(self, app, client):
+        @app.route('/')
+        @use_args(NameSchema, location='querystring')
+        @use_args(InstrumentSchema, location='querystring')
+        def view(*args):
+            return list(args)
+        res = client.get('/', {'name': 'freddie', 'instrument': 'vocals'})
+        assert res.json == [{'instrument': 'vocals'}, {'name': 'freddie'}]
+
+    def test_use_args_callable_as_schema(self, app, client):
+        def schema_factory(request):
+            assert request.method == 'GET'
+            assert request.path == '/'
+
+            class ArgSchema(Schema):
+                name = fields.Str()
+
+            return ArgSchema
+
+        @app.route('/')
+        @use_args(schema_factory, location='querystring')
+        def view(*args):
+            return args
+        res = client.get('/', {'name': 'freddie'})
+        assert res.json == {'name': 'freddie'}
 
     def test_use_kwargs(self, app, client):
         @app.route('/')
@@ -113,7 +196,7 @@ class TestFunctionViews:
 
             @post_load
             def make_object(self, data, **kwargs):
-                return User(**data)
+                return {"user": User(**data)}
 
         @app.route('/', methods=('POST', ))
         @use_kwargs(ArgSchema(), location='json_or_form')
@@ -125,6 +208,32 @@ class TestFunctionViews:
         res = client.post('/', data)
         assert res.json == data
 
+    def test_use_kwargs_schema_with_post_load_schema(self, app, client):
+        class User:
+            def __init__(self, name):
+                self.name = name
+
+            def update(self, name):
+                self.name = name
+
+        class ArgSchema(Schema):
+            name = fields.Str()
+
+            @post_load
+            def make_object(self, data, **kwargs):
+                return User(**data)
+
+        @app.route('/', methods=('POST', ))
+        @use_kwargs(ArgSchema(), location='form')
+        def view(user):
+            assert isinstance(user, User)
+            return {'name': user.name}
+
+        data = {'name': 'freddie'}
+        with pytest.raises(Exception, match=r"The @use_kwargs decorator can only use Schemas that return "
+                                            r"dicts, but the @post_load-annotated method '.*' returned: .*"):
+            client.post('/', data)
+
     def test_use_kwargs_schema_many(self, app, client):
         class ArgSchema(Schema):
             name = fields.Str()
@@ -134,8 +243,10 @@ class TestFunctionViews:
         def view(*args):
             return list(args)
         data = [{'name': 'freddie'}, {'name': 'john'}]
-        res = client.post('/', json.dumps(data), content_type='application/json')
-        assert res.json == data
+
+        with pytest.raises(Exception, match="@use_kwargs cannot be used with a with a 'many=True' "
+                                            "schema, as it must deserialize to a dict"):
+            client.post('/', json.dumps(data), content_type='application/json', expect_errors=True)
 
     def test_use_kwargs_multiple(self, app, client):
         @app.route('/')
